@@ -1,10 +1,12 @@
 /*============================================================================
     main.c - user mode консольная утилита для управления драйвером
     Соответствует ТЗ: раздел 5, пример сценария раздел 9
+    Компиляция: gcc -o ssdtmon.exe main.c -lwinmm -static
 ============================================================================*/
 
 #include <windows.h>
 #include <stdio.h>
+#include <time.h>
 #include "common.h"
 
 static HANDLE hDevice = INVALID_HANDLE_VALUE;
@@ -23,7 +25,14 @@ BOOL OpenDevice(VOID)
         FILE_ATTRIBUTE_NORMAL,
         NULL);
     
-    return (hDevice != INVALID_HANDLE_VALUE);
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        printf("[-] Failed to open driver. Error: %d\n", GetLastError());
+        printf("    Make sure SsdtMon driver is loaded.\n");
+        printf("    Run this program as Administrator!\n");
+        return FALSE;
+    }
+    
+    return TRUE;
 }
 
 /*----------------------------------------------------------------------------
@@ -160,6 +169,8 @@ BOOL GetLog(VOID)
     ULONG i;
     SYSTEMTIME st;
     FILETIME ft;
+    time_t rawtime;
+    struct tm* timeinfo;
     
     result = DeviceIoControl(
         hDevice,
@@ -176,35 +187,95 @@ BOOL GetLog(VOID)
         return FALSE;
     }
     
-    printf("\n=== SSDT Monitor Log (%d events) ===\n", bytesRead / sizeof(LOG_ENTRY));
+    printf("\n=== SSDT Monitor Log (%d events) ===\n\n", bytesRead / sizeof(LOG_ENTRY));
     
     for (i = 0; i < bytesRead / sizeof(LOG_ENTRY); i++) {
-        // Конвертация времени
+        // Конвертация FILETIME в читаемый формат
         ft.dwLowDateTime = logBuffer[i].Timestamp.LowPart;
         ft.dwHighDateTime = logBuffer[i].Timestamp.HighPart;
         FileTimeToSystemTime(&ft, &st);
         
-        printf("[%02d:%02d:%02d] ", st.wHour, st.wMinute, st.wSecond);
+        printf("[%02d:%02d:%02d.%03d] ", 
+               st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
         
         switch (logBuffer[i].ChangeType) {
             case CHANGE_TYPE_ADDRESS:
-                printf("[ADDR CHANGE] Index 0x%X: 0x%p -> 0x%p\n",
+                printf("[ADDR CHANGE] Index 0x%04X: 0x%016llX -> 0x%016llX\n",
                        logBuffer[i].ServiceIndex,
-                       (PVOID)logBuffer[i].ExpectedValue,
-                       (PVOID)logBuffer[i].ActualValue);
+                       logBuffer[i].ExpectedValue,
+                       logBuffer[i].ActualValue);
                 break;
+                
             case CHANGE_TYPE_BYTECODE:
-                printf("[BYTECODE CHANGE] Index 0x%X: byte mismatch\n",
-                       logBuffer[i].ServiceIndex);
-                break;
-            case CHANGE_TYPE_RESTORED:
-                printf("[RESTORED] Index 0x%X: restored to 0x%p\n",
+                printf("[BYTECODE CHANGE] Index 0x%04X: expected 0x%02llX, got 0x%02llX\n",
                        logBuffer[i].ServiceIndex,
-                       (PVOID)logBuffer[i].ActualValue);
+                       logBuffer[i].ExpectedValue,
+                       logBuffer[i].ActualValue);
+                break;
+                
+            case CHANGE_TYPE_RESTORED:
+                printf("[RESTORED] Index 0x%04X: restored to 0x%016llX\n",
+                       logBuffer[i].ServiceIndex,
+                       logBuffer[i].ActualValue);
+                break;
+                
+            default:
+                printf("[UNKNOWN] Index 0x%04X: type=%d\n",
+                       logBuffer[i].ServiceIndex, logBuffer[i].ChangeType);
                 break;
         }
     }
     
+    printf("\n");
+    return TRUE;
+}
+
+/*----------------------------------------------------------------------------
+    ListHooks - получение списка активных хуков (ТЗ раздел 5, IOCTL_GET_HOOKS)
+----------------------------------------------------------------------------*/
+BOOL ListHooks(VOID)
+{
+    HOOK_INFO hookBuffer[256];
+    DWORD bytesRead;
+    BOOL result;
+    ULONG i;
+    ULONG hookCount;
+    
+    result = DeviceIoControl(
+        hDevice,
+        IOCTL_SSDT_GET_HOOKS,
+        NULL,
+        0,
+        hookBuffer,
+        sizeof(hookBuffer),
+        &bytesRead,
+        NULL);
+    
+    if (!result) {
+        printf("[-] Failed to get hooks (error: %d)\n", GetLastError());
+        return FALSE;
+    }
+    
+    hookCount = bytesRead / sizeof(HOOK_INFO);
+    
+    if (hookCount == 0) {
+        printf("No active hooks installed.\n");
+        return TRUE;
+    }
+    
+    printf("\n=== Active Hooks ===\n\n");
+    printf("Idx     Original Address     Current Address      Status\n");
+    printf("--------------------------------------------------------\n");
+    
+    for (i = 0; i < hookCount; i++) {
+        printf("0x%04X  0x%016llX   0x%016llX   %s\n",
+               hookBuffer[i].ServiceIndex,
+               hookBuffer[i].OriginalAddress,
+               hookBuffer[i].CurrentAddress,
+               hookBuffer[i].IsHooked ? "HOOKED" : "---");
+    }
+    
+    printf("\n");
     return TRUE;
 }
 
@@ -236,25 +307,56 @@ BOOL RestoreSSDT(VOID)
 }
 
 /*----------------------------------------------------------------------------
-    PrintUsage - справка по командам
+    ClearLog - очистка лога (ТЗ раздел 5, IOCTL_CLEAR_LOG)
 ----------------------------------------------------------------------------*/
-void PrintUsage(void)
+BOOL ClearLogCmd(VOID)
 {
-    printf("\nSSDT Integrity Monitor - User Mode Controller\n");
+    DWORD bytesReturned;
+    BOOL result;
+    
+    result = DeviceIoControl(
+        hDevice,
+        IOCTL_SSDT_CLEAR_LOG,
+        NULL,
+        0,
+        NULL,
+        0,
+        &bytesReturned,
+        NULL);
+    
+    if (result) {
+        printf("[+] Log buffer cleared\n");
+    } else {
+        printf("[-] Failed to clear log (error: %d)\n", GetLastError());
+    }
+    
+    return result;
+}
+
+/*----------------------------------------------------------------------------
+    PrintHelp - справка по командам
+----------------------------------------------------------------------------*/
+void PrintHelp(void)
+{
+    printf("\n");
+    printf("SSDT Integrity Monitor - User Mode Controller v2.0\n");
+    printf("===================================================\n\n");
     printf("Usage: ssdtmon.exe <command> [args]\n\n");
     printf("Commands:\n");
     printf("  --set-hook <index> <address>   Install hook on syscall index\n");
     printf("  --remove-hook <index>          Remove hook from index\n");
-    printf("  --monitor-start [ms]           Start integrity monitor (default 200ms)\n");
+    printf("  --list-hooks                   List all active hooks\n");
+    printf("  --monitor-start [ms]           Start integrity monitor (default: 200ms)\n");
     printf("  --monitor-stop                 Stop integrity monitor\n");
     printf("  --get-log                      Display log buffer\n");
     printf("  --restore                      Restore original SSDT\n");
     printf("  --clear-log                    Clear log buffer\n");
     printf("  --help                         Show this help\n\n");
     printf("Example (согласно ТЗ раздел 9):\n");
-    printf("  ssdtmon.exe --set-hook 0x3F 0xFFFFF80001234567\n");
+    printf("  ssdtmon.exe --set-hook 0x7F 0xFFFFF80001234567\n");
     printf("  ssdtmon.exe --monitor-start 200\n");
     printf("  ssdtmon.exe --get-log\n");
+    printf("  ssdtmon.exe --restore\n\n");
 }
 
 /*----------------------------------------------------------------------------
@@ -263,24 +365,25 @@ void PrintUsage(void)
 int main(int argc, char* argv[])
 {
     if (argc < 2) {
-        PrintUsage();
+        PrintHelp();
         return 1;
     }
     
     if (!OpenDevice()) {
-        printf("[-] Failed to open driver. Make sure SsdtMon is loaded.\n");
-        printf("    Run as Administrator!\n");
         return 1;
     }
     
     if (strcmp(argv[1], "--set-hook") == 0 && argc >= 4) {
-        ULONG index = strtoul(argv[2], NULL, 16);
+        ULONG index = (ULONG)strtoul(argv[2], NULL, 16);
         ULONG64 address = strtoull(argv[3], NULL, 16);
         InstallHook(index, address);
     }
     else if (strcmp(argv[1], "--remove-hook") == 0 && argc >= 3) {
-        ULONG index = strtoul(argv[2], NULL, 16);
+        ULONG index = (ULONG)strtoul(argv[2], NULL, 16);
         RemoveHook(index);
+    }
+    else if (strcmp(argv[1], "--list-hooks") == 0) {
+        ListHooks();
     }
     else if (strcmp(argv[1], "--monitor-start") == 0) {
         ULONG ms = (argc >= 3) ? atoi(argv[2]) : 200;
@@ -296,10 +399,14 @@ int main(int argc, char* argv[])
         RestoreSSDT();
     }
     else if (strcmp(argv[1], "--clear-log") == 0) {
-        ClearLog();
+        ClearLogCmd();
+    }
+    else if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+        PrintHelp();
     }
     else {
-        PrintUsage();
+        printf("[-] Unknown command: %s\n", argv[1]);
+        PrintHelp();
     }
     
     CloseDevice();

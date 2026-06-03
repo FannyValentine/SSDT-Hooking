@@ -1,0 +1,25 @@
+# sources - файл для сборки драйвера через WDK build.exe
+
+TARGETNAME=SsdtMon
+TARGETTYPE=DRIVER
+TARGETPATH=obj
+
+SOURCES=main.c \
+        ssdt_access.c \
+        hook_mgr.c \
+        monitor.c \
+        logger.c \
+        ioctl.c
+
+INCLUDES=$(INCLUDES);.
+
+TARGETLIBS=$(TARGETLIBS)
+
+# Для Windows 10 x64
+C_DEFINES=$(C_DEFINES) -D_WIN32_WINNT=0x0A00 -D_WIN64
+
+# Для отладки
+C_DEFINES=$(C_DEFINES) -DDBG=1
+
+USE_NATIVE_EH=1
+USE_MSVCRT=1

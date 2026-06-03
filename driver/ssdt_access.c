@@ -1,5 +1,5 @@
 /*============================================================================
-    ssdt_access.c - поиск SSDT и работа с таблицей
+    ssdt_access.c - поиск SSDT, MDL, эталонная копия
     Соответствует ТЗ: разделы 4.1, 4.2
 ============================================================================*/
 
@@ -13,10 +13,14 @@ extern ULONG KiServiceLimit;
 extern ULONG64* GoldenAddressTable;
 extern ULONG64* HookTable;
 
+// Локальные переменные
+static PMDL g_ServiceTableMdl = NULL;
+static PVOID g_MappedAddress = NULL;
+
 /*----------------------------------------------------------------------------
     FindKeServiceDescriptorTableWin10 - поиск SSDT через сигнатуры (ТЗ 4.1)
-    Для Windows 10 x64 KeServiceDescriptorTable не экспортируется,
-    поэтому используем поиск по сигнатуре в районе KiSystemCall64
+    Для Windows 10 x64 KeServiceDescriptorTable не экспортируется.
+    Используем поиск по сигнатуре в районе KiSystemCall64 (MSR IA32_LSTAR)
 ----------------------------------------------------------------------------*/
 NTSTATUS FindKeServiceDescriptorTableWin10(VOID)
 {
@@ -27,7 +31,13 @@ NTSTATUS FindKeServiceDescriptorTableWin10(VOID)
     PSYSTEM_SERVICE_DESCRIPTOR_TABLE foundTable = NULL;
     
     // Чтение MSR IA32_LSTAR (0xC0000082) - адрес KiSystemCall64
-    msrLstar = __readmsr(0xC0000082);
+    __asm {
+        mov ecx, 0xC0000082
+        rdmsr
+        mov dword ptr [msrLstar], eax
+        mov dword ptr [msrLstar + 4], edx
+    }
+    
     kiSystemCall64 = (PUCHAR)msrLstar;
     
     DbgPrint("SsdtMon: KiSystemCall64 at 0x%p\n", kiSystemCall64);
@@ -61,7 +71,7 @@ NTSTATUS FindKeServiceDescriptorTableWin10(VOID)
 
 /*----------------------------------------------------------------------------
     CreateMdlForSSDT - создание MDL для безопасной записи в SSDT
-    Современный метод вместо отключения CR0.WP
+    Современный метод вместо отключения CR0.WP (PatchGuard friendly)
 ----------------------------------------------------------------------------*/
 NTSTATUS CreateMdlForSSDT(VOID)
 {
@@ -91,7 +101,13 @@ NTSTATUS CreateMdlForSSDT(VOID)
         return STATUS_UNSUCCESSFUL;
     }
     
+    g_ServiceTableMdl = mdl;
+    g_MappedAddress = mappedAddress;
+    
+    // Обновляем указатель на мапленную память
     KiServiceTable = (ULONG64*)mappedAddress;
+    
+    DbgPrint("SsdtMon: MDL created, mapped at 0x%p\n", mappedAddress);
     return STATUS_SUCCESS;
 }
 
@@ -144,6 +160,35 @@ NTSTATUS RestoreOriginalSSDT(VOID)
             HookTable[i] = 0;
             DbgPrint("SsdtMon: Restored index 0x%X\n", i);
         }
+    }
+    
+    return STATUS_SUCCESS;
+}
+
+/*----------------------------------------------------------------------------
+    SetSSDTEntry - установка адреса в SSDT (через MDL)
+----------------------------------------------------------------------------*/
+NTSTATUS SetSSDTEntry(ULONG Index, ULONG64 Address)
+{
+    if (Index >= KiServiceLimit) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    KiServiceTable[Index] = Address;
+    return STATUS_SUCCESS;
+}
+
+/*----------------------------------------------------------------------------
+    GetSSDTEntry - чтение адреса из SSDT
+----------------------------------------------------------------------------*/
+NTSTATUS GetSSDTEntry(ULONG Index, ULONG64* OutAddress)
+{
+    if (Index >= KiServiceLimit) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    if (OutAddress) {
+        *OutAddress = KiServiceTable[Index];
     }
     
     return STATUS_SUCCESS;

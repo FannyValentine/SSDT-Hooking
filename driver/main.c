@@ -1,6 +1,6 @@
 /*============================================================================
-    main.c - точка входа драйвера
-    Соответствует ТЗ: разделы 1, 4
+    main.c - точка входа и инициализация драйвера
+    Соответствует ТЗ: разделы 1, 4, 8
 ============================================================================*/
 
 #include <ntddk.h>
@@ -12,6 +12,8 @@ NTSTATUS FindKeServiceDescriptorTableWin10(VOID);
 NTSTATUS CreateMdlForSSDT(VOID);
 NTSTATUS SaveGoldenCopy(VOID);
 NTSTATUS RestoreOriginalSSDT(VOID);
+NTSTATUS InitLogger(VOID);
+VOID FreeLogger(VOID);
 NTSTATUS StartMonitor(ULONG IntervalMs);
 NTSTATUS StopMonitor(VOID);
 NTSTATUS InstallHook(ULONG ServiceIndex, ULONG64 HookFunction);
@@ -19,17 +21,18 @@ NTSTATUS RemoveHook(ULONG ServiceIndex);
 NTSTATUS ClearLog(VOID);
 NTSTATUS DeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 
-// Глобальные переменные (экспортируются)
+// Глобальные переменные (экспортируются в другие модули)
 PSYSTEM_SERVICE_DESCRIPTOR_TABLE KeServiceDescriptorTable = NULL;
 ULONG64* KiServiceTable = NULL;
 ULONG KiServiceLimit = 0;
 ULONG64* GoldenAddressTable = NULL;
 ULONG64* HookTable = NULL;
 BOOLEAN MonitoringActive = FALSE;
+BOOLEAN AutoRestore = FALSE;
 PDEVICE_OBJECT g_DeviceObject = NULL;
 
 /*----------------------------------------------------------------------------
-    DriverEntry - точка входа драйвера (согласно ТЗ раздел 4.1)
+    DriverEntry - точка входа (ТЗ раздел 4.1)
 ----------------------------------------------------------------------------*/
 NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 {
@@ -63,7 +66,14 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         return status;
     }
     
-    // 4. Создание устройства для IOCTL (ТЗ раздел 5)
+    // 4. Инициализация лога (кольцевой буфер)
+    status = InitLogger();
+    if (!NT_SUCCESS(status)) {
+        DbgPrint("SsdtMon: Failed to init logger (0x%X)\n", status);
+        return status;
+    }
+    
+    // 5. Создание устройства для IOCTL (ТЗ раздел 5)
     RtlInitUnicodeString(&deviceName, L"\\Device\\SsdtMon");
     RtlInitUnicodeString(&symLinkName, L"\\DosDevices\\SsdtMon");
     
@@ -83,7 +93,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     deviceObject->Flags |= DO_DIRECT_IO;
     g_DeviceObject = deviceObject;
     
-    // 5. Настройка dispatch-функций
+    // 6. Настройка dispatch-функций
     DriverObject->MajorFunction[IRP_MJ_CREATE] = 
         DriverObject->MajorFunction[IRP_MJ_CLOSE] = 
             (PDRIVER_DISPATCH)IoCreateClose;
@@ -123,6 +133,7 @@ VOID DriverUnload(PDRIVER_OBJECT DriverObject)
     // Освобождение памяти
     if (GoldenAddressTable) ExFreePoolWithTag(GoldenAddressTable, 'tdSS');
     if (HookTable) ExFreePoolWithTag(HookTable, 'tdSS');
+    FreeLogger();
     
     DbgPrint("SsdtMon: Driver unloaded\n");
 }
